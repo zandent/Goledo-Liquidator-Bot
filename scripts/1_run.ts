@@ -16,11 +16,13 @@ let uipoolAddr = addresses.UiPoolDataProvider;
 let LendingPoolJSON = require(`./abis/LendingPool.sol/LendingPool.json`);
 let LendingPoolAddr = addresses.LendingPool;
 let LiquidateLoanJSON = require(`../artifacts/contracts/LiquidateLoan.sol/LiquidateLoan.json`);
-let LiquidateLoanAddr = "0xd89e850E11b9c0A8041A3a58Ab71687e70dd056c";
+let LiquidateLoanAddr = "0x854480c0bC69cA3b6E9207068F0202AbdC9b2789";
 const allowedLiquidation = 50 //50% of a borrowed asset can be liquidated
 // const healthFactorMax = BigNumber.from('1000000000000000000'); //liquidation can happen when less than 1
 const healthFactorMax = BigNumber.from('2000000000000000000'); //liquidation can happen when less than 1
 export var profit_threshold = BigNumber.from('100000000000000000') //.1 * (10**18) //in eth. A bonus below this will be ignored
+const GAS_FEE_ESTIMATE = BigInt(1000000000*1000000);
+const FLASH_LOAN_FEE = 0.009;
 type User = {
     status: string;
     message: string;
@@ -60,17 +62,8 @@ async function request<TResponse>(
         // Handle the error.
       }
   }
-async function readDataFromUser(user, uipoolContract, LendingPoolContract, poolDataUIPool){
-    let userDataUIPool = await uipoolContract.getUserReservesData(addresses.LendingPoolAddressesProvider, user);
-    let userDatalp = await LendingPoolContract.getUserAccountData(user);
-    console.log('==============begin============');
-    console.log(userDataUIPool);
-    console.log(userDatalp);
-    console.log('==============end============');
-}
-async function parseUsers(rawData, uipoolContract, LendingPoolContract){
+async function parseUsers(rawData, uipoolContract, LendingPoolContract, poolDataUIPool){
     var loans=[];
-    let poolDataUIPool = await uipoolContract.getSimpleReservesData(addresses.LendingPoolAddressesProvider);
     // console.log(poolDataUIPool);
     for (const entry of rawData.result) {
         var max_borrowedSymbol;
@@ -124,6 +117,148 @@ async function parseUsers(rawData, uipoolContract, LendingPoolContract){
     loans = [...new Map(loans.map((m) => [m.user_id, m])).values()];
     return loans;
 }
+async function liquidationProfits(loans, poolDataUIPool, SwappiRouterContract, LiquidateLoanContract){
+    for (var loan of loans) {
+        await liquidationProfit(loan, poolDataUIPool, SwappiRouterContract, LiquidateLoanContract);
+    }
+}
+async function liquidationProfit(loan, poolDataUIPool, SwappiRouterContract, LiquidateLoanContract){
+    //flash loan fee
+    const flashLoanAmount = percentBigInt(BigInt(loan.max_borrowedPrincipal), allowedLiquidation);
+    const flashLoanCost = percentBigInt(flashLoanAmount, FLASH_LOAN_FEE);
+  //minimum amount of liquidated coins that will be paid out as profit
+  var flashLoanAmountInEth = flashLoanAmount * BigInt(loan.max_borrowedPriceInEth) / BigInt(10 ** poolDataUIPool[0][loan.max_borrowedID].decimals);
+  var flashLoanAmountInEth_plusBonus = percentBigInt(flashLoanAmountInEth,loan.max_collateralBonus); //add the bonus
+  var collateralTokensFromPayout  = flashLoanAmountInEth_plusBonus * BigInt(10 ** poolDataUIPool[0][loan.max_collateralID].decimals) / BigInt(loan.max_collateralPriceInEth); //this is the amount of tokens that will be received as payment for liquidation and then will need to be swapped back to token of the flashloan
+  let [bestPath, bestAmtOut] = await fakeSwap(poolDataUIPool[0][loan.max_collateralID].underlyingAsset, collateralTokensFromPayout, poolDataUIPool[0][loan.max_borrowedID].underlyingAsset,SwappiRouterContract);
+//   console.log("best path:", bestPath, "amount in", amtIn, "max Amount out", bestAmtOut);
+  var minimumTokensAfterSwap = bestAmtOut;
+  var gasFee = GAS_FEE_ESTIMATE; //calc gas fee
+  var flashLoanPlusCost = (flashLoanCost + flashLoanAmount);
+  var profitInBorrowCurrency = minimumTokensAfterSwap - flashLoanPlusCost;
+  var profitInEth = profitInBorrowCurrency * BigInt(loan.max_borrowedPriceInEth) / BigInt(10 ** poolDataUIPool[0][loan.max_borrowedID].decimals);
+  var profitInEthAfterGas = (profitInEth)  - gasFee;
+  if (profitInEthAfterGas>0.1)
+  {
+    console.log("-------------------------------")
+    console.log(`user_ID:${loan.user_id}`)
+    console.log(`HealthFactor ${loan.healthFactor}`)
+    console.log(`flashLoanAmount ${flashLoanAmount} ${loan.max_borrowedSymbol}`)
+    console.log(`flashLoanAmount converted to eth ${flashLoanAmountInEth}`)
+    console.log(`flashLoanAmount converted to eth plus bonus ${flashLoanAmountInEth_plusBonus}`)
+    console.log(`payout in collateral Tokens ${collateralTokensFromPayout} ${loan.max_collateralSymbol}`)
+    console.log(`${loan.max_borrowedSymbol} received from swap ${minimumTokensAfterSwap} ${loan.max_borrowedSymbol}`)
+    console.log("best path:", bestPath);
+    console.log(`flashLoanPlusCost ${flashLoanPlusCost}`)
+    console.log(`gasFee ${gasFee}`)
+    console.log(`profitInEthAfterGas ${Number(profitInEthAfterGas)/(10 ** 18)}cfx`)
+    const tx = await LiquidateLoanContract.executeFlashLoans(
+        poolDataUIPool[0][loan.max_borrowedID].underlyingAsset,
+        flashLoanAmount,
+        poolDataUIPool[0][loan.max_collateralID].underlyingAsset,
+        loan.user_id,
+        minimumTokensAfterSwap,
+        bestPath
+      );
+      console.log(">> LiquidateLoanContract executeFlashLoans, hash:", tx.hash);
+      await tx.wait();
+      console.log(">> ✅ Done");
+  }
+}
+async function fakeSwap(inAddr, amtIn, outAddr, SwappiRouterContract){
+    if (inAddr.toLowerCase() === outAddr.toLowerCase()) {
+        return [[], amtIn];
+    }
+    let tokeList = [];
+    for (var val of addresses.SwappiSwapTokens) {
+        if (val.toLowerCase() !== inAddr.toLowerCase() && val.toLowerCase() !== outAddr.toLowerCase()) {
+            tokeList.push(val);
+        }
+    }
+    // Auxiliary space to store each path
+    let paths = new Array();
+    paths = allPaths(tokeList);
+    // console.log("all paths:", paths);
+    return await findBestTrade(inAddr, amtIn, outAddr, SwappiRouterContract, paths);
+}
+async function findBestTrade(inAddr, amtIn, outAddr, SwappiRouterContract, paths){
+    let bestPath = [];
+    let amtOut = BigInt(0);
+    let bestAmtOut = 0;
+    for (var val of paths) {
+        val.unshift(inAddr);
+        val.push(outAddr);
+        amtOut = await SwappiRouterContract.getAmountsOut(amtIn, val);
+        if (bestAmtOut <= amtOut[amtOut.length-1].toBigInt()) {
+            bestPath = val;
+            bestAmtOut = amtOut[amtOut.length-1].toBigInt();
+            // console.log("current best path:", bestPath, "amount out", bestAmtOut);
+        }
+    }
+    return [bestPath, bestAmtOut];
+}
+function allPaths(tokeList) {
+    let paths = [];
+    let tempPath = new Array();
+    printSubsequences(tokeList, 0, tempPath, paths);
+    let returnedPaths = [];
+    for (var val of paths) {
+        if (val.length == 1) {
+            returnedPaths.push(val);
+        }else{
+            returnedPaths = returnedPaths.concat(permutations(val));
+        }
+    }
+    returnedPaths.push([]);
+    return returnedPaths;
+}
+// Recursive function to print all
+// possible subsequences for given array
+function printSubsequences(arr, index, path, returnedPaths)
+{
+
+  // Print the subsequence when reach
+  // the leaf of recursion tree
+  if (index == arr.length)
+  {
+   
+    // Condition to avoid printing
+    // empty subsequence
+    if (path.length > 0) {let newPath = [...path]; returnedPaths.push(newPath);};
+  }
+  else
+  {
+   
+    // Subsequence without including
+    // the element at current index
+    printSubsequences(arr, index + 1, path, returnedPaths);
+ 
+    path.push(arr[index]);
+ 
+    // Subsequence including the element
+    // at current index
+    printSubsequences(arr, index + 1, path, returnedPaths);
+ 
+    // Backtrack to remove the recently
+    // inserted element
+    path.pop();
+  }
+  return;
+}
+const permutations = arr => {
+    if (arr.length <= 2) return arr.length === 2 ? [arr, [arr[1], arr[0]]] : arr;
+    return arr.reduce(
+      (acc, item, i) =>
+        acc.concat(
+          permutations([...arr.slice(0, i), ...arr.slice(i + 1)]).map(val => [
+            item,
+            ...val,
+          ])
+        ),
+      []
+    );
+  };
+ 
 async function main() {
     const [deployer] = await ethers.getSigners();
     console.log("The account:", deployer.address);
@@ -132,15 +267,23 @@ async function main() {
     let SwappiRouterContract = new ethers.Contract(SwappiRouterAddr, SwappiRouterJSON.abi, deployer);
     let uipoolContract = new ethers.Contract(uipoolAddr, uipoolJSON.abi, deployer);
     let LendingPoolContract = new ethers.Contract(LendingPoolAddr, LendingPoolJSON.abi, deployer);
+    let poolDataUIPool = await uipoolContract.getSimpleReservesData(addresses.LendingPoolAddressesProvider);
     var blockNumBefore = await ethers.provider.getBlockNumber();
+    blockNumBefore = blockNumBefore - 100;
     blockNumBefore = 92568690;
     let scanUrl = `https://evmapi-testnet.confluxscan.net/api?module=account&action=txlist&address=${addresses.LendingPool}&startblock=${blockNumBefore}&sort=desc`;
     const data = await request<User>(scanUrl);
     // console.log(data.result);
-    let loans = await parseUsers(data, uipoolContract, LendingPoolContract);
+    let loans = await parseUsers(data, uipoolContract, LendingPoolContract, poolDataUIPool);
     console.log("loans:", loans);
+    await liquidationProfits(loans, poolDataUIPool, SwappiRouterContract, LiquidateLoanContract);
 }
-  
+// percent is represented as a number less than 0 ie .75 is equivalent to 75%
+// multiply base and percent and return a BigInt
+function percentBigInt(base:BigInt,percent:decimal):BigInt {
+    return BigInt(base * BigInt(percent * 10000) / 10000n)
+}
+
 main()
 .then(() => process.exit(0))
 .catch((error) => {

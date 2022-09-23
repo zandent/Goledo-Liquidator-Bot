@@ -60,7 +60,9 @@ contract LiquidateLoan is FlashLoanReceiverBase, Ownable {
         liquidateLoan(collateral, assets[0], userToLiquidate, amounts[0], false);
 
         //swap collateral from liquidate back to asset from flashloan to pay it off
-        swapToBarrowedAsset(collateral,assets[0],amountOutMin, swapPath);
+        if (swapPath.length != 0) {
+            swapToBarrowedAsset(collateral,assets[0],amountOutMin, swapPath);
+        }
 
         //Pay to owner the balance after fees
         uint256 profit = calcProfits(IERC20(assets[0]).balanceOf(address(this)),amounts[0],premiums[0]);
