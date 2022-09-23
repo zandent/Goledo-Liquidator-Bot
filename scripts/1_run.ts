@@ -1,13 +1,17 @@
 import { ethers } from "hardhat";
 import hre from 'hardhat';
+import * as fs from 'fs';
 const { BigNumber } = require("ethers");
 const fetch = require('node-fetch');
 const networkName = hre.network.name;
 let addresses;
+let DATABASE;
 if (networkName == 'testnet') {
     addresses = require('./testnetConfig.json');
+    DATABASE = require(`./testnetdatabase.json`);
 }else{
     addresses = require('./espaceConfig.json');
+    DATABASE = require(`./espacedatabase.json`);
 }
 let SwappiRouterJSON = require(`./abis/SwappiRouter.sol/SwappiRouter.json`);
 let SwappiRouterAddr = addresses.SwappiRouter;
@@ -15,15 +19,15 @@ let uipoolJSON = require(`./abis/UiPoolDataProvider.sol/UiPoolDataProvider.json`
 let uipoolAddr = addresses.UiPoolDataProvider;
 let LendingPoolJSON = require(`./abis/LendingPool.sol/LendingPool.json`);
 let LendingPoolAddr = addresses.LendingPool;
-let IERC20DetailedJSON = require(`./abis/IERC20Detailed.sol/IERC20Detailed.json`);
 let LiquidateLoanJSON = require(`../artifacts/contracts/LiquidateLoan.sol/LiquidateLoan.json`);
-let LiquidateLoanAddr = "0x4A67F14453B82133706DCf2F54d97f67C0492087";
+let LiquidateLoanAddr = addresses.LiquidateLoanAddr;
 const allowedLiquidation = 50 //50% of a borrowed asset can be liquidated
-// const healthFactorMax = BigNumber.from('1000000000000000000'); //liquidation can happen when less than 1
-const healthFactorMax = BigNumber.from('2000000000000000000'); //liquidation can happen when less than 1
+const healthFactorMax = BigNumber.from('1000000000000000000'); //liquidation can happen when less than 1
+// const healthFactorMax = BigNumber.from('2000000000000000000'); //liquidation can happen when less than 1
 export var profit_threshold = BigNumber.from('100000000000000000') //.1 * (10**18) //in eth. A bonus below this will be ignored
 const GAS_FEE_ESTIMATE = BigInt(1000000000*2000000);
 const FLASH_LOAN_FEE = 0.009;
+const CHECKPERIOD = 60000; // 60 sec
 type User = {
     status: string;
     message: string;
@@ -64,9 +68,15 @@ async function request<TResponse>(
       }
   }
 async function parseUsers(rawData, uipoolContract, LendingPoolContract, poolDataUIPool){
+    for (const entry of rawData.result) {
+        if (DATABASE.accountsCaptured.includes(entry.from) == false) {
+            DATABASE.accountsCaptured.push(entry.from);
+        }
+    }
     var loans=[];
     // console.log(poolDataUIPool);
-    for (const entry of rawData.result) {
+    for (const entry of DATABASE.accountsCaptured) {
+        console.log(`Processing account ${entry}...`);
         var max_borrowedSymbol;
         var max_borrowedID;
         var max_borrowedPrincipal=BigNumber.from(0);
@@ -75,8 +85,8 @@ async function parseUsers(rawData, uipoolContract, LendingPoolContract, poolData
         var max_collateralID;
         var max_collateralBonus = BigNumber.from(0);
         var max_collateralPriceInEth = BigNumber.from(0);
-        var userDataUIPool = await uipoolContract.getUserReservesData(addresses.LendingPoolAddressesProvider, entry.from);
-        var userDatalp = await LendingPoolContract.getUserAccountData(entry.from);
+        var userDataUIPool = await uipoolContract.getUserReservesData(addresses.LendingPoolAddressesProvider, entry);
+        var userDatalp = await LendingPoolContract.getUserAccountData(entry);
         // console.log(userDataUIPool);
         userDataUIPool[0].forEach((reserve, i) => {
             var priceInEth= poolDataUIPool[0][i].priceInEth;
@@ -96,7 +106,7 @@ async function parseUsers(rawData, uipoolContract, LendingPoolContract, poolData
         });
         if (userDatalp.healthFactor.lt(healthFactorMax)) {
             loans.push( {
-                "user_id"  :  entry.from,
+                "user_id"  :  entry,
                 "healthFactor"   :  userDatalp.healthFactor,
                 "max_collateralSymbol" : max_collateralSymbol,
                 "max_collateralID" : max_collateralID,
@@ -109,13 +119,9 @@ async function parseUsers(rawData, uipoolContract, LendingPoolContract, poolData
             });
         }
     }
-    // console.log("loans before", loans);
-    // console.log("poolDataUIPool[loan.max_borrowedID].decimals", poolDataUIPool[0].decimals);
-    // console.log("BigNumber.from(poolDataUIPool[loan.max_borrowedID].decimals)", loans[0].max_borrowedPrincipal .mul(allowedLiquidation).div(100) .mul (loans[0].max_collateralBonus.sub(10000)).div(10000).mul(loans[0].max_borrowedPriceInEth).div(BigNumber.from(10).pow(BigNumber.from(poolDataUIPool[0][loans[0].max_borrowedID].decimals))));
-    //filter out loans under a threshold that we know will not be profitable (liquidation_threshold)
     loans = loans.filter(loan => loan.max_borrowedPrincipal .mul(allowedLiquidation).div(100) .mul (loan.max_collateralBonus.sub(10000)).div(10000).mul(loan.max_borrowedPriceInEth).div(BigNumber.from(10).pow(BigNumber.from(poolDataUIPool[0][loan.max_borrowedID].decimals))) >= profit_threshold);
-    //remove duplicates
-    loans = [...new Map(loans.map((m) => [m.user_id, m])).values()];
+    // //remove duplicates
+    // loans = [...new Map(loans.map((m) => [m.user_id, m])).values()];
     return loans;
 }
 async function liquidationProfits(loans, poolDataUIPool, SwappiRouterContract, LiquidateLoanContract, deployer){
@@ -259,7 +265,9 @@ const permutations = arr => {
       []
     );
   };
- 
+function delay(time) {
+    return new Promise(resolve => setTimeout(resolve, time));
+}; 
 async function main() {
     const [deployer] = await ethers.getSigners();
     console.log("The account:", deployer.address);
@@ -269,20 +277,25 @@ async function main() {
     let uipoolContract = new ethers.Contract(uipoolAddr, uipoolJSON.abi, deployer);
     let LendingPoolContract = new ethers.Contract(LendingPoolAddr, LendingPoolJSON.abi, deployer);
     let poolDataUIPool = await uipoolContract.getSimpleReservesData(addresses.LendingPoolAddressesProvider);
-    var blockNumBefore = await ethers.provider.getBlockNumber();
-    blockNumBefore = blockNumBefore - 100;
-    blockNumBefore = 92568690;
+    var currentblockNum = await ethers.provider.getBlockNumber();
     var scanUrl;
     if (networkName == 'testnet') {
-        scanUrl = `https://evmapi-testnet.confluxscan.net/api?module=account&action=txlist&address=${addresses.LendingPool}&startblock=${blockNumBefore}&sort=desc`;
+        scanUrl = `https://evmapi-testnet.confluxscan.net/api?module=account&action=txlist&address=${addresses.LendingPool}&startblock=${DATABASE.lastblock}&sort=desc`;
     }else{
-        scanUrl = `https://evmapi.confluxscan.net/api?module=account&action=txlist&address=${addresses.LendingPool}&startblock=${blockNumBefore}&sort=desc`;
+        scanUrl = `https://evmapi.confluxscan.net/api?module=account&action=txlist&address=${addresses.LendingPool}&startblock=${DATABASE.lastblock}&sort=desc`;
     }
-    const data = await request<User>(scanUrl);
-    // console.log(data.result);
-    let loans = await parseUsers(data, uipoolContract, LendingPoolContract, poolDataUIPool);
-    console.log("loans:", loans);
-    await liquidationProfits(loans, poolDataUIPool, SwappiRouterContract, LiquidateLoanContract, deployer);
+    while (1) {
+        const data = await request<User>(scanUrl);
+        // console.log(data.result);
+        let loans = await parseUsers(data, uipoolContract, LendingPoolContract, poolDataUIPool);
+        console.log("loans:", loans);
+        //store into file
+        DATABASE.lastblock = currentblockNum + 1;
+        let writeableDATABASE = JSON.stringify(DATABASE, null, 2);
+        fs.writeFileSync(`./scripts/${networkName}database.json`, writeableDATABASE);
+        await liquidationProfits(loans, poolDataUIPool, SwappiRouterContract, LiquidateLoanContract, deployer);
+        await delay(CHECKPERIOD);
+    }
 }
 // percent is represented as a number less than 0 ie .75 is equivalent to 75%
 // multiply base and percent and return a BigInt

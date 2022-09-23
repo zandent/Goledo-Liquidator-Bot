@@ -13,7 +13,7 @@ module.exports = {
         _privateKey
       ]
     },
-    mainnet: {
+    espace: {
       url: "http://evm.confluxrpc.com",
       accounts: [
         _privateKey
