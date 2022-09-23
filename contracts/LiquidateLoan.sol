@@ -113,23 +113,29 @@ contract LiquidateLoan is FlashLoanReceiverBase, Ownable {
         asset_fromToken.approve(address(uniswapV2Router), amountToTrade);
 
         // Trade 1: Execute swap from asset_from into designated ERC20 (asset_to) token on UniswapV2
-        try uniswapV2Router.swapExactTokensForTokens(
-            amountToTrade,
-            amountOutMin,
-            swapPath,
-            address(this),
-            deadline
-        ){
-        }
-        catch Error(string memory reason)
-        {
-            emit ErrorHandled(reason);
-        }
-        catch
-        {
+        // try uniswapV2Router.swapExactTokensForTokens(
+        //     amountToTrade,
+        //     amountOutMin,
+        //     swapPath,
+        //     address(this),
+        //     deadline
+        // ){
+        // }
+        // catch Error(string memory reason)
+        // {
+        //     emit ErrorHandled(reason);
+        // }
+        // catch
+        // {
 
-        }
-
+        // }
+        uniswapV2Router.swapExactTokensForTokens(
+                    amountToTrade,
+                    amountOutMin,
+                    swapPath,
+                    address(this),
+                    deadline
+                );
     }
 
 
