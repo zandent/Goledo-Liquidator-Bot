@@ -27,7 +27,7 @@ const healthFactorMax = BigNumber.from('1000000000000000000'); //liquidation can
 export var profit_threshold = BigNumber.from('100000000000000000') //.1 * (10**18) //in eth. A bonus below this will be ignored
 const GAS_FEE_ESTIMATE = BigInt(1000000000*2000000);
 const FLASH_LOAN_FEE = 0.009;
-const CHECKPERIOD = 60000; // 60 sec
+const CHECKPERIOD = 3600000; // 3600 sec
 type User = {
     status: string;
     message: string;
@@ -74,7 +74,7 @@ async function parseUsers(rawData, uipoolContract, LendingPoolContract, poolData
         }
     }
     var loans=[];
-    // console.log(poolDataUIPool);
+    console.log(`The length of accounts to be processed ${DATABASE.accountsCaptured.length}`);
     for (const entry of DATABASE.accountsCaptured) {
         console.log(`Processing account ${entry}...`);
         var max_borrowedSymbol;
@@ -85,38 +85,37 @@ async function parseUsers(rawData, uipoolContract, LendingPoolContract, poolData
         var max_collateralID;
         var max_collateralBonus = BigNumber.from(0);
         var max_collateralPriceInEth = BigNumber.from(0);
-        var userDataUIPool = await uipoolContract.getUserReservesData(addresses.LendingPoolAddressesProvider, entry);
         var userDatalp = await LendingPoolContract.getUserAccountData(entry);
-        // console.log(userDataUIPool);
-        userDataUIPool[0].forEach((reserve, i) => {
-            var priceInEth= poolDataUIPool[0][i].priceInEth;
-            var principalBorrowed = reserve.scaledVariableDebt.add(reserve.principalStableDebt);
-            if (principalBorrowed.gte(max_borrowedPrincipal)) {
-              max_borrowedSymbol = poolDataUIPool[0][i].symbol
-              max_borrowedID = i;
-              max_borrowedPrincipal = principalBorrowed
-              max_borrowedPriceInEth = priceInEth
-            }
-            if (reserve.scaledATokenBalance.gt(BigNumber.from(0)) && poolDataUIPool[0][i].reserveLiquidationBonus.gt(max_collateralBonus)){
-                max_collateralSymbol = poolDataUIPool[0][i].symbol
-                max_collateralID = i;
-                max_collateralBonus = poolDataUIPool[0][i].reserveLiquidationBonus
-                max_collateralPriceInEth = priceInEth
-            }
-        });
         if (userDatalp.healthFactor.lt(healthFactorMax)) {
-            loans.push( {
-                "user_id"  :  entry,
-                "healthFactor"   :  userDatalp.healthFactor,
-                "max_collateralSymbol" : max_collateralSymbol,
-                "max_collateralID" : max_collateralID,
-                "max_borrowedSymbol" : max_borrowedSymbol,
-                "max_borrowedID" : max_borrowedID,
-                "max_borrowedPrincipal" : max_borrowedPrincipal,
-                "max_borrowedPriceInEth" : max_borrowedPriceInEth,
-                "max_collateralBonus" : max_collateralBonus,
-                "max_collateralPriceInEth" : max_collateralPriceInEth
+            var userDataUIPool = await uipoolContract.getUserReservesData(addresses.LendingPoolAddressesProvider, entry);
+            userDataUIPool[0].forEach((reserve, i) => {
+                var priceInEth= poolDataUIPool[0][i].priceInEth;
+                var principalBorrowed = reserve.scaledVariableDebt.add(reserve.principalStableDebt);
+                if (principalBorrowed.gte(max_borrowedPrincipal)) {
+                max_borrowedSymbol = poolDataUIPool[0][i].symbol
+                max_borrowedID = i;
+                max_borrowedPrincipal = principalBorrowed
+                max_borrowedPriceInEth = priceInEth
+                }
+                if (reserve.scaledATokenBalance.gt(BigNumber.from(0)) && poolDataUIPool[0][i].reserveLiquidationBonus.gt(max_collateralBonus)){
+                    max_collateralSymbol = poolDataUIPool[0][i].symbol
+                    max_collateralID = i;
+                    max_collateralBonus = poolDataUIPool[0][i].reserveLiquidationBonus
+                    max_collateralPriceInEth = priceInEth
+                }
             });
+                loans.push( {
+                    "user_id"  :  entry,
+                    "healthFactor"   :  userDatalp.healthFactor,
+                    "max_collateralSymbol" : max_collateralSymbol,
+                    "max_collateralID" : max_collateralID,
+                    "max_borrowedSymbol" : max_borrowedSymbol,
+                    "max_borrowedID" : max_borrowedID,
+                    "max_borrowedPrincipal" : max_borrowedPrincipal,
+                    "max_borrowedPriceInEth" : max_borrowedPriceInEth,
+                    "max_collateralBonus" : max_collateralBonus,
+                    "max_collateralPriceInEth" : max_collateralPriceInEth
+                });
         }
     }
     loans = loans.filter(loan => loan.max_borrowedPrincipal .mul(allowedLiquidation).div(100) .mul (loan.max_collateralBonus.sub(10000)).div(10000).mul(loan.max_borrowedPriceInEth).div(BigNumber.from(10).pow(BigNumber.from(poolDataUIPool[0][loan.max_borrowedID].decimals))) >= profit_threshold);
