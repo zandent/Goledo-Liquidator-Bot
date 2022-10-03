@@ -85,23 +85,26 @@ async function parseUsers(rawData, uipoolContract, LendingPoolContract, poolData
         var max_collateralID;
         var max_collateralBonus = BigNumber.from(0);
         var max_collateralPriceInEth = BigNumber.from(0);
+        var max_collateralInEth = BigNumber.from(0);
         var userDatalp = await LendingPoolContract.getUserAccountData(entry);
         if (userDatalp.healthFactor.lt(healthFactorMax)) {
             var userDataUIPool = await uipoolContract.getUserReservesData(addresses.LendingPoolAddressesProvider, entry);
             userDataUIPool[0].forEach((reserve, i) => {
                 var priceInEth= poolDataUIPool[0][i].priceInEth;
                 var principalBorrowed = reserve.scaledVariableDebt.add(reserve.principalStableDebt);
+                var collateralInEth = reserve.scaledATokenBalance.mul(priceInEth).div(BigNumber.from(10).pow(BigNumber.from(poolDataUIPool[0][i].decimals)));
                 if (principalBorrowed.gte(max_borrowedPrincipal)) {
-                max_borrowedSymbol = poolDataUIPool[0][i].symbol
-                max_borrowedID = i;
-                max_borrowedPrincipal = principalBorrowed
-                max_borrowedPriceInEth = priceInEth
+                    max_borrowedSymbol = poolDataUIPool[0][i].symbol
+                    max_borrowedID = i;
+                    max_borrowedPrincipal = principalBorrowed
+                    max_borrowedPriceInEth = priceInEth
                 }
-                if (reserve.scaledATokenBalance.gt(BigNumber.from(0)) && poolDataUIPool[0][i].reserveLiquidationBonus.gt(max_collateralBonus)){
+                if (reserve.usageAsCollateralEnabledOnUser == true && reserve.scaledATokenBalance.gt(BigNumber.from(0)) /*&& poolDataUIPool[0][i].reserveLiquidationBonus.gt(max_collateralBonus)*/ && collateralInEth.gt(max_collateralInEth)){
                     max_collateralSymbol = poolDataUIPool[0][i].symbol
                     max_collateralID = i;
                     max_collateralBonus = poolDataUIPool[0][i].reserveLiquidationBonus
                     max_collateralPriceInEth = priceInEth
+                    max_collateralInEth = collateralInEth
                 }
             });
                 loans.push( {
@@ -114,7 +117,8 @@ async function parseUsers(rawData, uipoolContract, LendingPoolContract, poolData
                     "max_borrowedPrincipal" : max_borrowedPrincipal,
                     "max_borrowedPriceInEth" : max_borrowedPriceInEth,
                     "max_collateralBonus" : max_collateralBonus,
-                    "max_collateralPriceInEth" : max_collateralPriceInEth
+                    "max_collateralPriceInEth" : max_collateralPriceInEth,
+                    "max_collateralInEth" : max_collateralInEth
                 });
         }
     }
@@ -137,7 +141,7 @@ async function liquidationProfit(loan, poolDataUIPool, SwappiRouterContract, Liq
   var flashLoanAmountInEth_plusBonus = percentBigInt(flashLoanAmountInEth,loan.max_collateralBonus.toNumber()/10000); //add the bonus
   var collateralTokensFromPayout  = flashLoanAmountInEth_plusBonus * BigInt(10 ** poolDataUIPool[0][loan.max_collateralID].decimals) / BigInt(loan.max_collateralPriceInEth); //this is the amount of tokens that will be received as payment for liquidation and then will need to be swapped back to token of the flashloan
   let [bestPath, bestAmtOut] = await fakeSwap(poolDataUIPool[0][loan.max_collateralID].underlyingAsset, collateralTokensFromPayout, poolDataUIPool[0][loan.max_borrowedID].underlyingAsset,SwappiRouterContract);
-//   console.log("best path:", bestPath, "amount in", amtIn, "max Amount out", bestAmtOut);
+  // console.log("best path:", bestPath, "amount in", collateralTokensFromPayout, "max Amount out", bestAmtOut);
   var minimumTokensAfterSwap = bestAmtOut;
   var gasFee = GAS_FEE_ESTIMATE; //calc gas fee
   var flashLoanPlusCost = (flashLoanCost + flashLoanAmount);
@@ -169,6 +173,19 @@ async function liquidationProfit(loan, poolDataUIPool, SwappiRouterContract, Liq
     console.log(">> LiquidateLoanContract executeFlashLoans, hash:", tx.hash);
     await tx.wait();
     console.log(">> ✅ Done");
+  }else{
+    console.log("----------------NOT CONSIDERED---------------")
+    console.log(`user_ID:${loan.user_id}`)
+    console.log(`HealthFactor ${loan.healthFactor}`)
+    console.log(`flashLoanAmount ${flashLoanAmount} ${loan.max_borrowedSymbol}`)
+    console.log(`flashLoanAmount converted to USD ${flashLoanAmountInEth}`)
+    console.log(`flashLoanAmount converted to USD plus bonus ${flashLoanAmountInEth_plusBonus}`)
+    console.log(`payout in collateral Tokens ${collateralTokensFromPayout} ${loan.max_collateralSymbol}`)
+    console.log(`${loan.max_borrowedSymbol} received from swap ${minimumTokensAfterSwap} ${loan.max_borrowedSymbol}`)
+    console.log("best path:", bestPath);
+    console.log(`flashLoanPlusCost ${flashLoanPlusCost}`)
+    console.log(`gasFee ${gasFee}`)
+    console.log(`profitInEthAfterGas ${Number(profitInEthAfterGas)/(10 ** 18)} USD`)
   }
 }
 async function fakeSwap(inAddr, amtIn, outAddr, SwappiRouterContract){
@@ -293,6 +310,7 @@ async function main() {
         let writeableDATABASE = JSON.stringify(DATABASE, null, 2);
         fs.writeFileSync(`./scripts/${networkName}database.json`, writeableDATABASE);
         await liquidationProfits(loans, poolDataUIPool, SwappiRouterContract, LiquidateLoanContract, deployer);
+        console.log(`Wait ${CHECKPERIOD/1000} secs`);
         await delay(CHECKPERIOD);
     }
 }
