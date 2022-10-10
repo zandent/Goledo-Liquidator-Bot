@@ -67,8 +67,13 @@ async function request<TResponse>(
         // Handle the error.
       }
   }
-async function parseUsers(rawData, uipoolContract, LendingPoolContract, poolDataUIPool){
+async function parseUsers(rawData, rawDataForGW, uipoolContract, LendingPoolContract, poolDataUIPool){
     for (const entry of rawData.result) {
+        if (DATABASE.accountsCaptured.includes(entry.from) == false) {
+            DATABASE.accountsCaptured.push(entry.from);
+        }
+    }
+    for (const entry of rawDataForGW.result) {
         if (DATABASE.accountsCaptured.includes(entry.from) == false) {
             DATABASE.accountsCaptured.push(entry.from);
         }
@@ -295,15 +300,19 @@ async function main() {
     let poolDataUIPool = await uipoolContract.getSimpleReservesData(addresses.LendingPoolAddressesProvider);
     var currentblockNum = await ethers.provider.getBlockNumber();
     var scanUrl;
+    var scanUrlForGW;
     if (networkName == 'testnet') {
         scanUrl = `https://evmapi-testnet.confluxscan.net/api?module=account&action=txlist&address=${addresses.LendingPool}&startblock=${DATABASE.lastblock}&sort=desc`;
+        scanUrlForGW = `https://evmapi-testnet.confluxscan.net/api?module=account&action=txlist&address=${addresses.WETHGateway}&startblock=${DATABASE.lastblock}&sort=desc`;
     }else{
         scanUrl = `https://evmapi.confluxscan.net/api?module=account&action=txlist&address=${addresses.LendingPool}&startblock=${DATABASE.lastblock}&sort=desc`;
+        scanUrlForGW = `https://evmapi.confluxscan.net/api?module=account&action=txlist&address=${addresses.WETHGateway}&startblock=${DATABASE.lastblock}&sort=desc`;
     }
     while (1) {
         const data = await request<User>(scanUrl);
+        const dataForGW = await request<User>(scanUrlForGW);
         // console.log(data.result);
-        let loans = await parseUsers(data, uipoolContract, LendingPoolContract, poolDataUIPool);
+        let loans = await parseUsers(data, dataForGW, uipoolContract, LendingPoolContract, poolDataUIPool);
         console.log("loans:", loans);
         //store into file
         DATABASE.lastblock = currentblockNum + 1;
