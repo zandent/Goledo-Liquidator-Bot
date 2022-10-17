@@ -67,21 +67,11 @@ async function request<TResponse>(
         // Handle the error.
       }
   }
-async function parseUsers(rawData, rawDataForGW, uipoolContract, LendingPoolContract, poolDataUIPool){
-    for (const entry of rawData.result) {
-        if (DATABASE.accountsCaptured.includes(entry.from) == false) {
-            DATABASE.accountsCaptured.push(entry.from);
-        }
-    }
-    for (const entry of rawDataForGW.result) {
-        if (DATABASE.accountsCaptured.includes(entry.from) == false) {
-            DATABASE.accountsCaptured.push(entry.from);
-        }
-    }
+async function parseUsers(uipoolContract, LendingPoolContract, poolDataUIPool){
     var loans=[];
     console.log(`The length of accounts to be processed ${DATABASE.accountsCaptured.length}`);
     for (const entry of DATABASE.accountsCaptured) {
-        console.log(`Processing account ${entry}...`);
+        // console.log(`Processing account ${entry}...`);
         var max_borrowedSymbol;
         var max_borrowedID;
         var max_borrowedPrincipal=BigNumber.from(0);
@@ -302,17 +292,37 @@ async function main() {
     var scanUrl;
     var scanUrlForGW;
     if (networkName == 'testnet') {
-        scanUrl = `https://evmapi-testnet.confluxscan.net/api?module=account&action=txlist&address=${addresses.LendingPool}&startblock=${DATABASE.lastblock}&sort=desc`;
-        scanUrlForGW = `https://evmapi-testnet.confluxscan.net/api?module=account&action=txlist&address=${addresses.WETHGateway}&startblock=${DATABASE.lastblock}&sort=desc`;
+        scanUrl = `https://evmapi-testnet.confluxscan.net/api?module=account&action=txlist&address=${addresses.LendingPool}&startblock=${DATABASE.lastblock}`;
+        scanUrlForGW = `https://evmapi-testnet.confluxscan.net/api?module=account&action=txlist&address=${addresses.WETHGateway}&startblock=${DATABASE.lastblock}`;
     }else{
-        scanUrl = `https://evmapi.confluxscan.net/api?module=account&action=txlist&address=${addresses.LendingPool}&startblock=${DATABASE.lastblock}&sort=desc`;
-        scanUrlForGW = `https://evmapi.confluxscan.net/api?module=account&action=txlist&address=${addresses.WETHGateway}&startblock=${DATABASE.lastblock}&sort=desc`;
+        scanUrl = `https://evmapi.confluxscan.net/api?module=account&action=txlist&address=${addresses.LendingPool}&startblock=${DATABASE.lastblock}`;
+        scanUrlForGW = `https://evmapi.confluxscan.net/api?module=account&action=txlist&address=${addresses.WETHGateway}&startblock=${DATABASE.lastblock}`;
     }
     while (1) {
-        const data = await request<User>(scanUrl);
-        const dataForGW = await request<User>(scanUrlForGW);
+        let i = 1;
+        let dataPerPage = await request<User>(scanUrl+`&page=${i}&sort=desc`);
+        while (dataPerPage.result.length > 0) {
+            for (const entry of dataPerPage.result) {
+                if (DATABASE.accountsCaptured.includes(entry.from) == false) {
+                    DATABASE.accountsCaptured.push(entry.from);
+                }
+            }
+            i = i + 1;
+            dataPerPage = await request<User>(scanUrl+`&page=${i}&sort=desc`);
+        }
+        i = 1;
+        let dataForGWPerPage = await request<User>(scanUrlForGW+`&page=${i}&sort=desc`);
+        while (dataForGWPerPage.result.length > 0) {
+            for (const entry of dataForGWPerPage.result) {
+                if (DATABASE.accountsCaptured.includes(entry.from) == false) {
+                    DATABASE.accountsCaptured.push(entry.from);
+                }
+            }
+            i = i + 1;
+            dataForGWPerPage = await request<User>(scanUrlForGW+`&page=${i}&sort=desc`);
+        }
         // console.log(data.result);
-        let loans = await parseUsers(data, dataForGW, uipoolContract, LendingPoolContract, poolDataUIPool);
+        let loans = await parseUsers(uipoolContract, LendingPoolContract, poolDataUIPool);
         console.log("loans:", loans);
         //store into file
         DATABASE.lastblock = currentblockNum + 1;
