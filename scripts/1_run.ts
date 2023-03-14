@@ -25,7 +25,7 @@ const allowedLiquidation = 50 //50% of a borrowed asset can be liquidated
 const healthFactorMax = BigNumber.from('1000000000000000000'); //liquidation can happen when less than 1
 // const healthFactorMax = BigNumber.from('2000000000000000000'); //liquidation can happen when less than 1
 export var profit_threshold = BigNumber.from('100000000000000000') //.1 * (10**18) //in eth. A bonus below this will be ignored
-const GAS_FEE_ESTIMATE = BigInt(1000000000*2000000);
+const GAS_FEE_ESTIMATE = BigInt(1000000000*2000000); // 0.002 in usd 
 const FLASH_LOAN_FEE = 0.009;
 const CHECKPERIOD = 3600000; // 3600 sec
 type User = {
@@ -135,7 +135,7 @@ async function liquidationProfit(loan, poolDataUIPool, SwappiRouterContract, Liq
   var flashLoanAmountInEth = flashLoanAmount * BigInt(loan.max_borrowedPriceInEth) / BigInt(10 ** poolDataUIPool[0][loan.max_borrowedID].decimals);
   var flashLoanAmountInEth_plusBonus = percentBigInt(flashLoanAmountInEth,loan.max_collateralBonus.toNumber()/10000); //add the bonus
   var collateralTokensFromPayout  = flashLoanAmountInEth_plusBonus * BigInt(10 ** poolDataUIPool[0][loan.max_collateralID].decimals) / BigInt(loan.max_collateralPriceInEth); //this is the amount of tokens that will be received as payment for liquidation and then will need to be swapped back to token of the flashloan
-  let [bestPath, bestAmtOut] = await fakeSwap(poolDataUIPool[0][loan.max_collateralID].underlyingAsset, collateralTokensFromPayout, poolDataUIPool[0][loan.max_borrowedID].underlyingAsset,SwappiRouterContract);
+  let [bestPath, bestAmtOut] = await fakeSwap(poolDataUIPool[0][loan.max_collateralID].underlyingAsset, collateralTokensFromPayout, poolDataUIPool[0][loan.max_borrowedID].underlyingAsset,SwappiRouterContract, loan.user_id);
   // console.log("best path:", bestPath, "amount in", collateralTokensFromPayout, "max Amount out", bestAmtOut);
   var minimumTokensAfterSwap = bestAmtOut;
   var gasFee = GAS_FEE_ESTIMATE; //calc gas fee
@@ -157,17 +157,32 @@ async function liquidationProfit(loan, poolDataUIPool, SwappiRouterContract, Liq
     console.log(`flashLoanPlusCost ${flashLoanPlusCost}`)
     console.log(`gasFee ${gasFee}`)
     console.log(`profitInEthAfterGas ${Number(profitInEthAfterGas)/(10 ** 18)} USD`)
-    let tx = await LiquidateLoanContract.executeFlashLoans(
-        poolDataUIPool[0][loan.max_borrowedID].underlyingAsset,
-        flashLoanAmount,
-        poolDataUIPool[0][loan.max_collateralID].underlyingAsset,
-        loan.user_id,
-        minimumTokensAfterSwap,
-        bestPath
-      );
-    console.log(">> LiquidateLoanContract executeFlashLoans, hash:", tx.hash);
-    await tx.wait();
-    console.log(">> ✅ Done");
+    var isFailed = true;
+    var times = 1;
+    while (times >= 0 && isFailed == true){
+        try {
+            console.log(`Try using new minimumTokensAfterSwap ${minimumTokensAfterSwap}`);
+            let tx = await LiquidateLoanContract.executeFlashLoans(
+                poolDataUIPool[0][loan.max_borrowedID].underlyingAsset,
+                flashLoanAmount,
+                poolDataUIPool[0][loan.max_collateralID].underlyingAsset,
+                loan.user_id,
+                minimumTokensAfterSwap,
+                bestPath
+            );
+            console.log(">> LiquidateLoanContract executeFlashLoans, hash:", tx.hash);
+            await tx.wait();
+            console.log(">> ✅ Done");
+            isFailed = false;
+        }catch (error) {
+            console.log(">> ❌ Tx Failed. Continue. Error:", error);
+            // minimumTokensAfterSwap = minimumTokensAfterSwap/ BigInt(10 ** (poolDataUIPool[0][loan.max_borrowedID].decimals.add(3).sub(times))) * BigInt(10 ** (poolDataUIPool[0][loan.max_borrowedID].decimals.add(3).sub(times)));
+            // console.log(`Wait ${10000/1000} secs for next try using new minimumTokensAfterSwap ${minimumTokensAfterSwap}`);
+            minimumTokensAfterSwap = 0;
+            await delay(10000);
+        }
+        times = times - 1;
+    }
   }else{
     console.log("----------------NOT CONSIDERED---------------")
     console.log(`user_ID:${loan.user_id}`)
@@ -183,7 +198,7 @@ async function liquidationProfit(loan, poolDataUIPool, SwappiRouterContract, Liq
     console.log(`profitInEthAfterGas ${Number(profitInEthAfterGas)/(10 ** 18)} USD`)
   }
 }
-async function fakeSwap(inAddr, amtIn, outAddr, SwappiRouterContract){
+async function fakeSwap(inAddr, amtIn, outAddr, SwappiRouterContract, user_id){
     if (inAddr.toLowerCase() === outAddr.toLowerCase()) {
         return [[], amtIn];
     }
@@ -196,10 +211,48 @@ async function fakeSwap(inAddr, amtIn, outAddr, SwappiRouterContract){
     // Auxiliary space to store each path
     let paths = new Array();
     paths = allPaths(tokeList);
+    // Delete all non cfx/xcfx neighbor paths  since the others paired with xcfx have no liquidity
+    // cfx: 0x14b2d3bc65e74dae1030eafd8ac30c533c976a9b, xcfx: 0x889138644274a7Dc602f25A7e7D53fF40E6d0091
+    let pathsTemp = new Array();
+    if (inAddr.toLowerCase() == "0x889138644274a7Dc602f25A7e7D53fF40E6d0091".toLowerCase()){
+        for (var val of paths) {
+            if (val.length == 0) {
+                if (outAddr.toLowerCase() == "0x14b2d3bc65e74dae1030eafd8ac30c533c976a9b".toLowerCase()) {
+                    pathsTemp.push(val);
+                }
+            }else{
+                if (val[0].toLowerCase() == "0x14b2d3bc65e74dae1030eafd8ac30c533c976a9b".toLowerCase()) {
+                    pathsTemp.push(val);
+                }
+            }
+        }
+    }else if (outAddr.toLowerCase() == "0x889138644274a7Dc602f25A7e7D53fF40E6d0091".toLowerCase()){
+        for (var val of paths) {
+            if (val.length == 0) {
+                if (inAddr.toLowerCase() == "0x14b2d3bc65e74dae1030eafd8ac30c533c976a9b".toLowerCase()) {
+                    pathsTemp.push(val);
+                }
+            }else{
+                if (val[val.length-1].toLowerCase() == "0x14b2d3bc65e74dae1030eafd8ac30c533c976a9b".toLowerCase()) {
+                    pathsTemp.push(val);
+                }
+            }
+        }
+    }else{
+        for (var val of paths) {
+            if (val.length == 0) {
+                pathsTemp.push(val);
+            }else{
+                if (val.includes("0x889138644274a7Dc602f25A7e7D53fF40E6d0091") == false) {
+                    pathsTemp.push(val);
+                }
+            }
+        }
+    }
     // console.log("all paths:", paths);
-    return await findBestTrade(inAddr, amtIn, outAddr, SwappiRouterContract, paths);
+    return await findBestTrade(inAddr, amtIn, outAddr, SwappiRouterContract, pathsTemp, user_id);
 }
-async function findBestTrade(inAddr, amtIn, outAddr, SwappiRouterContract, paths){
+async function findBestTrade(inAddr, amtIn, outAddr, SwappiRouterContract, paths, user_id){
     let bestPath = [];
     let amtOut = BigInt(0);
     let bestAmtOut = 0;
@@ -210,7 +263,6 @@ async function findBestTrade(inAddr, amtIn, outAddr, SwappiRouterContract, paths
         if (bestAmtOut <= amtOut[amtOut.length-1].toBigInt()) {
             bestPath = val;
             bestAmtOut = amtOut[amtOut.length-1].toBigInt();
-            // console.log("current best path:", bestPath, "amount out", bestAmtOut);
         }
     }
     return [bestPath, bestAmtOut];
