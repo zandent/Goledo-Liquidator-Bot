@@ -15,6 +15,8 @@ if (networkName == 'testnet') {
 }
 let SwappiRouterJSON = require(`./abis/SwappiRouter.sol/SwappiRouter.json`);
 let SwappiRouterAddr = addresses.SwappiRouter;
+let SwappiFactoryJSON = require(`./abis/SwappiFactory.sol/SwappiFactory.json`);
+let SwappiFactoryAddr = addresses.SwappiFactory;
 let uipoolJSON = require(`./abis/UiPoolDataProvider.sol/UiPoolDataProvider.json`);
 let uipoolAddr = addresses.UiPoolDataProvider;
 let LendingPoolJSON = require(`./abis/LendingPool.sol/LendingPool.json`);
@@ -26,7 +28,7 @@ const healthFactorMax = BigNumber.from('1000000000000000000'); //liquidation can
 // const healthFactorMax = BigNumber.from('2000000000000000000'); //liquidation can happen when less than 1
 export var profit_threshold = BigNumber.from('100000000000000000') //.1 * (10**18) //in eth. A bonus below this will be ignored
 const GAS_FEE_ESTIMATE = BigInt(1000000000*2000000); // 0.002 in usd 
-const FLASH_LOAN_FEE = 0.009;
+const FLASH_LOAN_FEE = 0.0009;
 const CHECKPERIOD = 3600000; // 3600 sec
 type User = {
     status: string;
@@ -161,7 +163,7 @@ async function liquidationProfit(loan, poolDataUIPool, SwappiRouterContract, Liq
     var times = 1;
     while (times >= 0 && isFailed == true){
         try {
-            console.log(`Try using new minimumTokensAfterSwap ${minimumTokensAfterSwap}`);
+            console.log(`Try using minimumTokensAfterSwap ${minimumTokensAfterSwap}`);
             let tx = await LiquidateLoanContract.executeFlashLoans(
                 poolDataUIPool[0][loan.max_borrowedID].underlyingAsset,
                 flashLoanAmount,
@@ -175,7 +177,8 @@ async function liquidationProfit(loan, poolDataUIPool, SwappiRouterContract, Liq
             console.log(">> ✅ Done");
             isFailed = false;
         }catch (error) {
-            console.log(">> ❌ Tx Failed. Continue. Error:", error);
+            // console.log(">> ❌ Tx Failed. Continue. Error:", error);
+            console.log(">> ❌ Tx Failed. Continue");
             // minimumTokensAfterSwap = minimumTokensAfterSwap/ BigInt(10 ** (poolDataUIPool[0][loan.max_borrowedID].decimals.add(3).sub(times))) * BigInt(10 ** (poolDataUIPool[0][loan.max_borrowedID].decimals.add(3).sub(times)));
             // console.log(`Wait ${10000/1000} secs for next try using new minimumTokensAfterSwap ${minimumTokensAfterSwap}`);
             minimumTokensAfterSwap = 0;
@@ -259,10 +262,13 @@ async function findBestTrade(inAddr, amtIn, outAddr, SwappiRouterContract, paths
     for (var val of paths) {
         val.unshift(inAddr);
         val.push(outAddr);
-        amtOut = await SwappiRouterContract.getAmountsOut(amtIn, val);
-        if (bestAmtOut <= amtOut[amtOut.length-1].toBigInt()) {
-            bestPath = val;
-            bestAmtOut = amtOut[amtOut.length-1].toBigInt();
+        try {
+            amtOut = await SwappiRouterContract.getAmountsOut(amtIn, val);
+            if (bestAmtOut <= amtOut[amtOut.length-1].toBigInt()) {
+                bestPath = val;
+                bestAmtOut = amtOut[amtOut.length-1].toBigInt();
+            }
+        } catch(error){
         }
     }
     return [bestPath, bestAmtOut];
@@ -344,11 +350,11 @@ async function main() {
     var scanUrl;
     var scanUrlForGW;
     if (networkName == 'testnet') {
-        scanUrl = `https://evmapi-testnet.confluxscan.net/api?module=account&action=txlist&address=${addresses.LendingPool}&startblock=${DATABASE.lastblock}`;
-        scanUrlForGW = `https://evmapi-testnet.confluxscan.net/api?module=account&action=txlist&address=${addresses.WETHGateway}&startblock=${DATABASE.lastblock}`;
+        scanUrl = `https://evmapi-testnet.confluxscan.net/api?module=account&action=txlist&address=${addresses.LendingPool}&startblock=${DATABASE.lastblock}&apikey=${process.env.APIKEY}`;
+        scanUrlForGW = `https://evmapi-testnet.confluxscan.net/api?module=account&action=txlist&address=${addresses.WETHGateway}&startblock=${DATABASE.lastblock}&apikey=${process.env.APIKEY}`;
     }else{
-        scanUrl = `https://evmapi.confluxscan.net/api?module=account&action=txlist&address=${addresses.LendingPool}&startblock=${DATABASE.lastblock}`;
-        scanUrlForGW = `https://evmapi.confluxscan.net/api?module=account&action=txlist&address=${addresses.WETHGateway}&startblock=${DATABASE.lastblock}`;
+        scanUrl = `https://evmapi.confluxscan.net/api?module=account&action=txlist&address=${addresses.LendingPool}&startblock=${DATABASE.lastblock}&apikey=${process.env.APIKEY}`;
+        scanUrlForGW = `https://evmapi.confluxscan.net/api?module=account&action=txlist&address=${addresses.WETHGateway}&startblock=${DATABASE.lastblock}&apikey=${process.env.APIKEY}`;
     }
     while (1) {
         let i = 1;
@@ -381,6 +387,8 @@ async function main() {
         let writeableDATABASE = JSON.stringify(DATABASE, null, 2);
         fs.writeFileSync(`./scripts/${networkName}database.json`, writeableDATABASE);
         await liquidationProfits(loans, poolDataUIPool, SwappiRouterContract, LiquidateLoanContract, deployer);
+        var date = new Date(Date.now());
+        console.log(`Timestamp: ${date.toString()}`);
         console.log(`Wait ${CHECKPERIOD/1000} secs`);
         await delay(CHECKPERIOD);
     }
