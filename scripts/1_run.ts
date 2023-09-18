@@ -358,8 +358,10 @@ async function main() {
     }
     while (1) {
         let i = 1;
+        // console.log(`Now dataPerPage processing page ${i} ${scanUrl}...`);
         let dataPerPage = await request<User>(scanUrl+`&page=${i}&sort=desc`);
         while (dataPerPage.result.length > 0) {
+            if (i%10 == 0) {console.log(`Processing page ${i}...`);}
             for (const entry of dataPerPage.result) {
                 if (DATABASE.accountsCaptured.includes(entry.from) == false) {
                     DATABASE.accountsCaptured.push(entry.from);
@@ -371,6 +373,7 @@ async function main() {
         i = 1;
         let dataForGWPerPage = await request<User>(scanUrlForGW+`&page=${i}&sort=desc`);
         while (dataForGWPerPage.result.length > 0) {
+            if (i%10 == 0) {console.log(`Processing WETHGateway page ${i}...`);}
             for (const entry of dataForGWPerPage.result) {
                 if (DATABASE.accountsCaptured.includes(entry.from) == false) {
                     DATABASE.accountsCaptured.push(entry.from);
