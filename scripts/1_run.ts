@@ -1,6 +1,7 @@
 import { ethers } from "hardhat";
 import hre from 'hardhat';
 import * as fs from 'fs';
+import { get } from "https";
 const { BigNumber } = require("ethers");
 const fetch = require('node-fetch');
 const networkName = hre.network.name;
@@ -12,6 +13,30 @@ if (networkName == 'testnet') {
 }else{
     addresses = require('./espaceConfig.json');
     DATABASE = require(`./espacedatabase.json`);
+}
+const ZERO_ADDRESS = "0x0000000000000000000000000000000000000000";
+// Create a 2D array with string indices
+let pairExistance = {};
+// Function to set value at a specific index
+function setValue(row, col, value) {
+    if(row < col){
+        if (!pairExistance[row]) {
+            pairExistance[row] = {};
+        }
+        pairExistance[row][col] = value;
+    }else{
+        if (!pairExistance[col]) {
+            pairExistance[col] = {};
+        }
+        pairExistance[col][row] = value;
+    }
+}
+// Function to get value at a specific index
+function getValue(row, col) {
+    if (row < col)
+        return pairExistance[row] && pairExistance[row][col];
+    else
+        return pairExistance[col] && pairExistance[col][row];
 }
 let SwappiRouterJSON = require(`./abis/SwappiRouter.sol/SwappiRouter.json`);
 let SwappiRouterAddr = addresses.SwappiRouter;
@@ -72,8 +97,11 @@ async function request<TResponse>(
 async function parseUsers(uipoolContract, LendingPoolContract, poolDataUIPool){
     var loans=[];
     console.log(`The length of accounts to be processed ${DATABASE.accountsCaptured.length}`);
+    var i = 0;
     for (const entry of DATABASE.accountsCaptured) {
-        // console.log(`Processing account ${entry}...`);
+        i++;
+        if (i%50 == 0) {console.log(`Processing account ${i-50} to ${i}...`);}
+        // if(entry !== "0x90763cf0ceb2d3ea37702d69db885e498eee14fb") continue;
         var max_borrowedSymbol;
         var max_borrowedID;
         var max_borrowedPrincipal=BigNumber.from(0);
@@ -137,9 +165,9 @@ async function liquidationProfit(loan, poolDataUIPool, SwappiRouterContract, Liq
   var flashLoanAmountInEth = flashLoanAmount * BigInt(loan.max_borrowedPriceInEth) / BigInt(10 ** poolDataUIPool[0][loan.max_borrowedID].decimals);
   var flashLoanAmountInEth_plusBonus = percentBigInt(flashLoanAmountInEth,loan.max_collateralBonus.toNumber()/10000); //add the bonus
   var collateralTokensFromPayout  = flashLoanAmountInEth_plusBonus * BigInt(10 ** poolDataUIPool[0][loan.max_collateralID].decimals) / BigInt(loan.max_collateralPriceInEth); //this is the amount of tokens that will be received as payment for liquidation and then will need to be swapped back to token of the flashloan
-  let [bestPath, bestAmtOut] = await fakeSwap(poolDataUIPool[0][loan.max_collateralID].underlyingAsset, collateralTokensFromPayout, poolDataUIPool[0][loan.max_borrowedID].underlyingAsset,SwappiRouterContract, loan.user_id);
+  let [bestPath, bestAmtOut] = await fakeSwap(poolDataUIPool[0][loan.max_collateralID].underlyingAsset, collateralTokensFromPayout, poolDataUIPool[0][loan.max_borrowedID].underlyingAsset,SwappiRouterContract, loan.user_id, deployer);
   // console.log("best path:", bestPath, "amount in", collateralTokensFromPayout, "max Amount out", bestAmtOut);
-  var minimumTokensAfterSwap = bestAmtOut;
+  var minimumTokensAfterSwap = BigInt(bestAmtOut);
   var gasFee = GAS_FEE_ESTIMATE; //calc gas fee
   var flashLoanPlusCost = (flashLoanCost + flashLoanAmount);
   var profitInBorrowCurrency = minimumTokensAfterSwap - flashLoanPlusCost;
@@ -201,7 +229,7 @@ async function liquidationProfit(loan, poolDataUIPool, SwappiRouterContract, Liq
     console.log(`profitInEthAfterGas ${Number(profitInEthAfterGas)/(10 ** 18)} USD`)
   }
 }
-async function fakeSwap(inAddr, amtIn, outAddr, SwappiRouterContract, user_id){
+async function fakeSwap(inAddr, amtIn, outAddr, SwappiRouterContract, user_id, deployer){
     if (inAddr.toLowerCase() === outAddr.toLowerCase()) {
         return [[], amtIn];
     }
@@ -217,48 +245,38 @@ async function fakeSwap(inAddr, amtIn, outAddr, SwappiRouterContract, user_id){
     // Delete all non cfx/xcfx neighbor paths  since the others paired with xcfx have no liquidity
     // cfx: 0x14b2d3bc65e74dae1030eafd8ac30c533c976a9b, xcfx: 0x889138644274a7Dc602f25A7e7D53fF40E6d0091
     let pathsTemp = new Array();
-    if (inAddr.toLowerCase() == "0x889138644274a7Dc602f25A7e7D53fF40E6d0091".toLowerCase()){
-        for (var val of paths) {
-            if (val.length == 0) {
-                if (outAddr.toLowerCase() == "0x14b2d3bc65e74dae1030eafd8ac30c533c976a9b".toLowerCase()) {
-                    pathsTemp.push(val);
+    let SwappiFactoryContract = new ethers.Contract(SwappiFactoryAddr, SwappiFactoryJSON.abi, deployer);
+    for (var val of paths) {
+        let isExist = true;
+        let valCopy = val;
+        valCopy.unshift(inAddr);
+        valCopy.push(outAddr);
+        for (var i = 0; i < valCopy.length - 1; i++) {
+            let val0 = valCopy[i].toLowerCase();
+            let val1 = valCopy[i+1].toLowerCase();
+            // console.log("Peek:", val0, val1, getValue(val0,val1));
+            if(getValue(val0,val1) == undefined){
+                let pairAddr = await SwappiFactoryContract.getPair(val0, val1);
+                // console.log("check:", val0, val1, pairAddr);
+                if (pairAddr == ZERO_ADDRESS) {
+                    setValue(val0, val1, 2);
+                }else{
+                    setValue(val0, val1, 1);
                 }
-            }else{
-                if (val[0].toLowerCase() == "0x14b2d3bc65e74dae1030eafd8ac30c533c976a9b".toLowerCase()) {
-                    pathsTemp.push(val);
-                }
+            }else if(getValue(val0,val1) == 2){
+                isExist = false; break;
             }
         }
-    }else if (outAddr.toLowerCase() == "0x889138644274a7Dc602f25A7e7D53fF40E6d0091".toLowerCase()){
-        for (var val of paths) {
-            if (val.length == 0) {
-                if (inAddr.toLowerCase() == "0x14b2d3bc65e74dae1030eafd8ac30c533c976a9b".toLowerCase()) {
-                    pathsTemp.push(val);
-                }
-            }else{
-                if (val[val.length-1].toLowerCase() == "0x14b2d3bc65e74dae1030eafd8ac30c533c976a9b".toLowerCase()) {
-                    pathsTemp.push(val);
-                }
-            }
-        }
-    }else{
-        for (var val of paths) {
-            if (val.length == 0) {
-                pathsTemp.push(val);
-            }else{
-                if (val.includes("0x889138644274a7Dc602f25A7e7D53fF40E6d0091") == false) {
-                    pathsTemp.push(val);
-                }
-            }
-        }
+        if(isExist) pathsTemp.push(val);
     }
-    // console.log("all paths:", paths);
+    // console.log("all paths:", pathsTemp);
     return await findBestTrade(inAddr, amtIn, outAddr, SwappiRouterContract, pathsTemp, user_id);
 }
 async function findBestTrade(inAddr, amtIn, outAddr, SwappiRouterContract, paths, user_id){
     let bestPath = [];
     let amtOut = BigInt(0);
     let bestAmtOut = 0;
+    paths.unshift([]);
     for (var val of paths) {
         val.unshift(inAddr);
         val.push(outAddr);
@@ -268,6 +286,7 @@ async function findBestTrade(inAddr, amtIn, outAddr, SwappiRouterContract, paths
                 bestPath = val;
                 bestAmtOut = amtOut[amtOut.length-1].toBigInt();
             }
+            console.log(`getAmountsOut log:`, amtIn, val, amtOut);
         } catch(error){
         }
     }
@@ -383,12 +402,13 @@ async function main() {
             dataForGWPerPage = await request<User>(scanUrlForGW+`&page=${i}&sort=desc`);
         }
         // console.log(data.result);
-        let loans = await parseUsers(uipoolContract, LendingPoolContract, poolDataUIPool);
-        console.log("loans:", loans);
         //store into file
+        console.log(`Saving to file...`);
         DATABASE.lastblock = currentblockNum + 1;
         let writeableDATABASE = JSON.stringify(DATABASE, null, 2);
         fs.writeFileSync(`./scripts/${networkName}database.json`, writeableDATABASE);
+        let loans = await parseUsers(uipoolContract, LendingPoolContract, poolDataUIPool);
+        console.log("loans:", loans);
         await liquidationProfits(loans, poolDataUIPool, SwappiRouterContract, LiquidateLoanContract, deployer);
         var date = new Date(Date.now());
         console.log(`Timestamp: ${date.toString()}`);

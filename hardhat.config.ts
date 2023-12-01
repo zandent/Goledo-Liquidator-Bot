@@ -14,7 +14,7 @@ module.exports = {
       ]
     },
     espace: {
-      url: "http://evm.confluxrpc.com",
+      url: `http://evm.confluxrpc.com/${process.env.RPCKEY}`,
       accounts: [
         _privateKey
       ]
